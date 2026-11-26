@@ -15,7 +15,6 @@ import {
   remove
 } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js";
 
-// Tu configuración real de Firebase
 const firebaseConfig = {
   apiKey: "AIzaSyDfkW7gfKGnjqf7eyvyzKIfOpKHFOGpc-A",
   authDomain: "pastillerow.firebaseapp.com",
@@ -32,20 +31,48 @@ const db = getDatabase(app);
 
 let usuarioActual = null;
 let dispositivoActivo = "";
+let caracteristicaHM10 = null;
 
 // Navegación entre vistas
 window.mostrarVista = (vista) => {
   ["tienda", "config", "mantencion"].forEach((v) => {
     document.getElementById(`vista-${v}`).classList.add("hidden");
     const btn = document.getElementById(`btn-${v}`);
-    btn.classList.remove("bg-teal-600", "text-white");
+    btn.classList.remove("bg-teal-600", "text-white", "shadow-sm");
     btn.classList.add("text-slate-600");
   });
   document.getElementById(`vista-${vista}`).classList.remove("hidden");
   const activeBtn = document.getElementById(`btn-${vista}`);
-  activeBtn.classList.add("bg-teal-600", "text-white");
+  activeBtn.classList.add("bg-teal-600", "text-white", "shadow-sm");
   activeBtn.classList.remove("text-slate-600");
 };
+
+// Conexión Web Bluetooth con módulo HM-10 (UUID estándar 0xFFE0 / 0xFFE1)
+window.conectarBluetooth = async () => {
+  if (!navigator.bluetooth) {
+    return alert("Tu navegador no soporta Web Bluetooth. Usa Google Chrome o Microsoft Edge en PC o Android.");
+  }
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [0xFFE0] }],
+      optionalServices: [0xFFE0]
+    });
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(0xFFE0);
+    caracteristicaHM10 = await service.getCharacteristic(0xFFE1);
+
+    document.getElementById("btn-ble").innerHTML = "<span>🟢 Conectado a " + (device.name || "HM-10") + "</span>";
+    document.getElementById("ble-status-banner").classList.remove("hidden");
+  } catch (error) {
+    alert("No se pudo conectar al HM-10: " + error.message);
+  }
+};
+
+async function enviarPorBluetooth(comandoTexto) {
+  if (!caracteristicaHM10) return;
+  const encoder = new TextEncoder();
+  await caracteristicaHM10.writeValue(encoder.encode(comandoTexto + "\n"));
+}
 
 // Autenticación
 window.registrarUsuario = async () => {
@@ -79,13 +106,13 @@ onAuthStateChanged(auth, (user) => {
     document.getElementById("usuario-correo-label").innerText = "Cuenta: " + user.email;
     escucharMantenciones();
   } else {
-    document.getElementById("user-status").innerText = "No has iniciado sesión";
+    document.getElementById("user-status").innerText = "Invitado";
     document.getElementById("auth-box").classList.remove("hidden");
     document.getElementById("dashboard-box").classList.add("hidden");
   }
 });
 
-// Módulo 1: Compras
+// Compras
 window.abrirModalCompra = () => document.getElementById("modal-compra").classList.remove("hidden");
 window.cerrarModalCompra = () => document.getElementById("modal-compra").classList.add("hidden");
 
@@ -93,7 +120,6 @@ window.confirmarCompra = async () => {
   const nombre = document.getElementById("compra-nombre").value.trim();
   const direccion = document.getElementById("compra-direccion").value.trim();
   const telefono = document.getElementById("compra-telefono").value.trim();
-
   if (!nombre || !direccion) return alert("Completa tu nombre y dirección de despacho.");
 
   const nuevoId = "MS-2026-" + Math.floor(1000 + Math.random() * 9000);
@@ -114,12 +140,12 @@ window.confirmarCompra = async () => {
   });
 
   cerrarModalCompra();
-  alert(`¡Pedido confirmado!\n\nEl ID de tu Pastillero Inteligente es: ${nuevoId}\nGuárdalo para configurarlo en la pestaña "Configurar Pastillero".`);
+  alert(`¡Pedido confirmado!\n\nEl ID de tu MediSync es: ${nuevoId}\nGuárdalo para configurarlo en la pestaña "Configurar Pastillero".`);
   document.getElementById("input-device-id").value = nuevoId;
   mostrarVista("config");
 };
 
-// Módulo 2: Configuración de Horarios y Hardware
+// Configuración
 window.cargarConfigDispositivo = () => {
   const id = document.getElementById("input-device-id").value.trim().toUpperCase();
   if (!id) return alert("Ingresa el ID de tu pastillero (ej. MS-2026-1234)");
@@ -135,7 +161,7 @@ window.cargarConfigDispositivo = () => {
     }
     Object.entries(data).forEach(([key, item]) => {
       const li = document.createElement("li");
-      li.className = "flex justify-between items-center bg-slate-50 px-3 py-2 rounded-lg border";
+      li.className = "flex justify-between items-center bg-slate-50 px-3 py-2 rounded-xl border";
       li.innerHTML = `
         <span><strong>${item.dia}</strong> • ${item.hora} — ${item.medicamento}</span>
         <button onclick="eliminarHorario('${key}')" class="text-red-500 text-xs font-bold">Eliminar</button>
@@ -154,6 +180,9 @@ window.agregarHorario = async () => {
 
   const nuevoRef = push(ref(db, `dispositivos/${dispositivoActivo}/horarios`));
   await set(nuevoRef, { dia, hora, medicamento, activo: true });
+
+  // Si el HM-10 está conectado por Bluetooth, le envía el comando directo al Arduino
+  await enviarPorBluetooth(`SET:${dia}:${hora}`);
   document.getElementById("toma-med").value = "";
 };
 
@@ -164,15 +193,21 @@ window.eliminarHorario = (key) => {
 
 window.guardarParametros = async () => {
   if (!dispositivoActivo) return alert("Primero carga un ID de pastillero.");
+  const buzzer = document.getElementById("cfg-buzzer").checked;
+  const sensor_ir = document.getElementById("cfg-ir").checked;
+  const tiempo = Number(document.getElementById("cfg-tiempo").value);
+
   await set(ref(db, `dispositivos/${dispositivoActivo}/config`), {
-    buzzer: document.getElementById("cfg-buzzer").checked,
-    sensor_ir: document.getElementById("cfg-ir").checked,
-    tiempo_rebloqueo_seg: Number(document.getElementById("cfg-tiempo").value)
+    buzzer,
+    sensor_ir,
+    tiempo_rebloqueo_seg: tiempo
   });
-  alert("Parámetros actualizados en Firebase para tu pastillero.");
+
+  await enviarPorBluetooth(`CFG:${buzzer ? 1 : 0}:${sensor_ir ? 1 : 0}:${tiempo}`);
+  alert("Parámetros guardados" + (caracteristicaHM10 ? " y enviados por Bluetooth al pastillero." : "."));
 };
 
-// Módulo 3: Mantención
+// Mantención
 window.enviarMantencion = async () => {
   if (!usuarioActual) return alert("Inicia sesión en 'Configurar Pastillero' para registrar mantenciones.");
   const dispositivo = document.getElementById("mant-device").value.trim().toUpperCase();
@@ -208,7 +243,7 @@ function escucharMantenciones() {
       .filter((t) => t.uid === usuarioActual?.uid)
       .forEach((t) => {
         const div = document.createElement("div");
-        div.className = "p-3 rounded-lg border bg-slate-50 flex justify-between items-center";
+        div.className = "p-3.5 rounded-xl border bg-slate-50 flex justify-between items-center";
         div.innerHTML = `
           <div>
             <p class="font-semibold text-slate-800">${t.dispositivo} — ${t.tipo}</p>
