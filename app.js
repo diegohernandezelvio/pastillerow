@@ -33,7 +33,7 @@ let usuarioActual = null;
 let dispositivoActivo = "";
 let caracteristicaHM10 = null;
 
-// Navegación entre vistas
+// 1. NAVEGACIÓN ENTRE VISTAS
 window.mostrarVista = (vista) => {
   ["tienda", "config", "mantencion"].forEach((v) => {
     document.getElementById(`vista-${v}`).classList.add("hidden");
@@ -47,7 +47,7 @@ window.mostrarVista = (vista) => {
   activeBtn.classList.remove("text-slate-600");
 };
 
-// Conexión Web Bluetooth con módulo HM-10 (UUID estándar 0xFFE0 / 0xFFE1)
+// 2. CONEXIÓN WEB BLUETOOTH CON MÓDULO HM-10
 window.conectarBluetooth = async () => {
   if (!navigator.bluetooth) {
     return alert("Tu navegador no soporta Web Bluetooth. Usa Google Chrome o Microsoft Edge en PC o Android.");
@@ -74,7 +74,7 @@ async function enviarPorBluetooth(comandoTexto) {
   await caracteristicaHM10.writeValue(encoder.encode(comandoTexto + "\n"));
 }
 
-// Autenticación
+// 3. AUTENTICACIÓN DE USUARIOS
 window.registrarUsuario = async () => {
   const email = document.getElementById("auth-email").value.trim();
   const pass = document.getElementById("auth-pass").value;
@@ -112,7 +112,7 @@ onAuthStateChanged(auth, (user) => {
   }
 });
 
-// Compras
+// 4. COMPRAS Y MERCADO PAGO CHILE (CHECKOUT PRO)
 window.abrirModalCompra = () => document.getElementById("modal-compra").classList.remove("hidden");
 window.cerrarModalCompra = () => document.getElementById("modal-compra").classList.add("hidden");
 
@@ -124,28 +124,41 @@ window.confirmarCompra = async () => {
 
   const nuevoId = "MS-2026-" + Math.floor(1000 + Math.random() * 9000);
 
+  // Guarda la orden en Firebase como pendiente antes de ir a pagar
   await set(ref(db, `pedidos/${nuevoId}`), {
     comprador: nombre,
     direccion,
     telefono,
     monto_clp: 29990,
+    estado_pago: "pendiente",
     uid: usuarioActual ? usuarioActual.uid : "invitado",
     fecha: new Date().toISOString()
   });
 
-  await set(ref(db, `dispositivos/${nuevoId}/config`), {
-    buzzer: true,
-    sensor_ir: true,
-    tiempo_rebloqueo_seg: 15
-  });
+  // Llama a tu función segura en Vercel (/api/crear-pago.js)
+  try {
+    const res = await fetch("/api/crear-pago", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pedidoId: nuevoId,
+        nombre,
+        email: usuarioActual ? usuarioActual.email : ""
+      })
+    });
 
-  cerrarModalCompra();
-  alert(`¡Pedido confirmado!\n\nEl ID de tu MediSync es: ${nuevoId}\nGuárdalo para configurarlo en la pestaña "Configurar Pastillero".`);
-  document.getElementById("input-device-id").value = nuevoId;
-  mostrarVista("config");
+    const data = await res.json();
+    if (data.init_point) {
+      window.location.href = data.init_point;
+    } else {
+      alert("Error al iniciar pago: " + JSON.stringify(data.error));
+    }
+  } catch (err) {
+    alert("Error de conexión con la pasarela de pago: " + err.message);
+  }
 };
 
-// Configuración
+// 5. CONFIGURACIÓN DE HORARIOS Y HARDWARE
 window.cargarConfigDispositivo = () => {
   const id = document.getElementById("input-device-id").value.trim().toUpperCase();
   if (!id) return alert("Ingresa el ID de tu pastillero (ej. MS-2026-1234)");
@@ -181,7 +194,6 @@ window.agregarHorario = async () => {
   const nuevoRef = push(ref(db, `dispositivos/${dispositivoActivo}/horarios`));
   await set(nuevoRef, { dia, hora, medicamento, activo: true });
 
-  // Si el HM-10 está conectado por Bluetooth, le envía el comando directo al Arduino
   await enviarPorBluetooth(`SET:${dia}:${hora}`);
   document.getElementById("toma-med").value = "";
 };
@@ -207,7 +219,7 @@ window.guardarParametros = async () => {
   alert("Parámetros guardados" + (caracteristicaHM10 ? " y enviados por Bluetooth al pastillero." : "."));
 };
 
-// Mantención
+// 6. MANTENCIÓN Y SOPORTE
 window.enviarMantencion = async () => {
   if (!usuarioActual) return alert("Inicia sesión en 'Configurar Pastillero' para registrar mantenciones.");
   const dispositivo = document.getElementById("mant-device").value.trim().toUpperCase();
@@ -255,3 +267,27 @@ function escucharMantenciones() {
       });
   });
 }
+
+// 7. VERIFICACIÓN AUTOMÁTICA AL VOLVER DE MERCADO PAGO
+window.addEventListener("DOMContentLoaded", async () => {
+  const params = new URLSearchParams(window.location.search);
+  const estadoPago = params.get("pago");
+  const pedidoId = params.get("id");
+
+  if (estadoPago === "aprobado" && pedidoId) {
+    await set(ref(db, `pedidos/${pedidoId}/estado_pago`), "aprobado");
+    await set(ref(db, `dispositivos/${pedidoId}/config`), {
+      buzzer: true,
+      sensor_ir: true,
+      tiempo_rebloqueo_seg: 15
+    });
+
+    alert(`¡Pago aprobado con éxito!\n\nEl ID de tu MediSync es: ${pedidoId}\nYa puedes configurarlo.`);
+    document.getElementById("input-device-id").value = pedidoId;
+    window.history.replaceState({}, document.title, "/");
+    mostrarVista("config");
+  } else if (estadoPago === "fallido") {
+    alert("El pago no pudo completarse. Puedes intentarlo nuevamente.");
+    window.history.replaceState({}, document.title, "/");
+  }
+});
